@@ -1,0 +1,291 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates WordPress EC2 Instance
+
+############################################################
+#              PARAMETERS RECORDS BLOCK
+############################################################ 
+Parameters:
+  AppName:
+    Type: String
+  SubnetIds:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+  AmiId:
+    Type: String
+  KeyName:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  VPC:
+    Type: AWS::EC2::VPC::Id
+  InstanceType:
+    Type: String
+    Default: t2.small
+  Environment:
+    Type: String
+    Default: dev
+  MinAutoscalingSize:
+    Type: Number
+    Default: "1"
+  MaxAutoscalingSize:
+    Type: Number
+    Default: "1"
+  HostedZoneName:
+    Type: String
+    Default: orderdig.com
+  CertificateARN:
+    Type: String
+    Default: 'N/A'
+
+Resources:
+#   ApplicationLB:
+#     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+#     Properties:
+#       Name: !Sub '${AppName}-${Environment}-ALB'
+#       SecurityGroups: 
+#         - !Ref LoadBalancerSecurityGroup
+#       Scheme: internet-facing
+#       Subnets: !Ref SubnetIds
+#       Type: application
+      
+#   AlbHttpListener:
+#     Type: 'AWS::ElasticLoadBalancingV2::Listener'
+#     Properties:
+#       LoadBalancerArn: !Ref ApplicationLB
+#       DefaultActions:
+#       - RedirectConfig:
+#             Host: "#{host}"
+#             Path: "/#{path}"
+#             Port: 443
+#             Protocol: "HTTPS"
+#             Query: "#{query}"
+#             StatusCode: HTTP_301
+#          Type: redirect
+#       Port: '80'
+#       Protocol: HTTP
+   
+#   AlbHttpsListener:
+#     Type: 'AWS::ElasticLoadBalancingV2::Listener'
+#     Properties:
+#       LoadBalancerArn: !Ref ApplicationLB
+#       DefaultActions:
+#         - Type: fixed-response
+#           FixedResponseConfig:
+#             StatusCode: 404
+#       Port: '443'
+#       Protocol: HTTPS
+#       Certificates:
+#         - CertificateArn: !Ref CertificateARN
+
+  ############################################################
+  #              ALB LISTENERS BLOCK
+  ############################################################
+  
+#   WordpressListenerRule:
+#     Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+#     Properties:
+#       Actions:
+#         - Type: forward
+#           TargetGroupArn: !Ref WordpressTargetGroup
+#       Conditions:
+#         - Field: host-header
+#           Values:
+#             - !Join ['', ['wordpress', ., !Ref HostedZoneName]]
+#       ListenerArn: !Ref AlbHttpsListener
+#       Priority: 1
+ 
+  
+  ############################################################
+  #               TARGET GROUP RECORDS BLOCK
+  ############################################################ 
+  
+#   WordpressTargetGroup:
+#     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+#     Properties:
+#       Name: !Sub '${AppName}-${Environment}-wordpress-TG'
+#       VpcId: !Ref VPC
+#       Protocol: HTTP
+#       Port: 8110
+#       HealthCheckPath: '/'
+#       HealthCheckProtocol: HTTP
+#       UnhealthyThresholdCount: 5
+#       HealthyThresholdCount: 2
+#       HealthCheckTimeoutSeconds: 10
+#       TargetType: instance  
+ 
+  
+  ############################################################
+  #               SECURITY GROUP RECORDS BLOCK
+  ############################################################
+  
+  # --- Load balancer security-group
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Load balancer security group'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0 
+
+  # --- EC2 security-group
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Allow access to ${AppName} ${Environment}'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          SourceSecurityGroupId:  !Ref LoadBalancerSecurityGroup
+
+  ############################################################
+  #             AUTOSCALING GROUP RECORDS BLOCK
+  ############################################################
+  
+  # --- Autoscaling group
+  ECSAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    DependsOn: 'LaunchTempate'
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT5M
+        SuspendProcesses:
+          - HealthCheck
+          - ReplaceUnhealthy
+          - AZRebalance
+          - AlarmNotification
+          - ScheduledActions
+    Properties:
+      VPCZoneIdentifier: !Ref SubnetIds
+      AutoScalingGroupName: !Sub '${AppName}-${Environment}-ASG'
+      HealthCheckGracePeriod: 30
+      HealthCheckType: EC2  #ELB
+    #   TargetGroupARNs:
+    #     - !Ref WordpressTargetGroup
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTempate
+        Version: !GetAtt LaunchTempate.LatestVersionNumber
+      MinSize: !Ref MinAutoscalingSize
+      MaxSize: !Ref MaxAutoscalingSize
+      Tags:
+        -
+          Key: Name
+          Value: !Sub "${AppName}-${Environment}-EC2"
+          PropagateAtLaunch: true
+ 
+  # --- Launch template
+  LaunchTempate:
+    Type: 'AWS::EC2::LaunchTemplate'
+    DependsOn: 'EC2IamRole'
+    Properties:
+      LaunchTemplateName: !Sub '${AppName}-${Environment}-LaunchTemplate'
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Name: !Ref EC2IamRoleInstanceProfile
+        ImageId: !Ref AmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds: 
+          - !Ref EC2SecurityGroup
+        UserData:
+          "Fn::Base64":
+            !Sub |
+              #!/bin/bash -x
+
+              exec > /var/log/cloud-init-output.log 2>&1
+
+              #!/bin/bash
+              sudo apt update
+
+              # -- setup apache, php and mysql
+              sudo apt install zip apache2 mysql-server mysql-client php7.2 php7.2-dev php7.2-mysql -y
+
+              # -- intall aws-cli
+              sudo apt-get install awscli -y
+
+              # ---
+              # --- restore latest version
+              # ---
+              ARTIFACTS_BUCKET=nettycoons-artifacts-bucket
+              LATEST_VERSION=$(aws s3 ls s3://$ARTIFACTS_BUCKET/wordpress/ | sort | tail -n -1 | awk '{print $4}')
+              aws s3 cp s3://$ARTIFACTS_BUCKET/wordpress/$LATEST_VERSION /tmp/
+              # --- delete default file
+              sudo rm /var/www/html/index.html
+              sudo unzip /tmp/$LATEST_VERSION -d /var/www/html/
+              sudo chown -R www-data:www-data /var/www/html
+              sudo rm -f /tmp/$LATEST_VERSION
+
+              # ---
+              # --- setup daily backup cron job
+              # ---
+              sudo mkdir -p /opt/scripts \
+                && sudo chmod 777 /opt/scripts
+              aws s3 cp s3://nettycoons-artifacts-bucket/scripts/backup-to-s3.sh /opt/scripts/
+              sudo chmod 777 /opt/scripts/backup-to-s3.sh
+              (crontab -l ; echo "0 0 * * * /opt/scripts/backup-to-s3.sh")| crontab -
+
+              # -- start apache
+              sudo service apache2 start
+        
+  ############################################################
+  #              IAM ROLE BLOCK
+  ############################################################
+  
+  # --- EC2 IAM role
+  EC2IamRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      Description: EC2 service role
+      RoleName: !Sub '${AppName}-${Environment}-ec2-role'
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ec2.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Policies:
+        -
+          PolicyName: !Sub '${AppName}-${Environment}-ec2-role-policy'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "cloudwatch:*"
+                  - "sns:*"
+                  - "ssm:*"
+                Resource: "*"
+
+  # --- EC2 Role Instance profile
+  EC2IamRoleInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      InstanceProfileName:  !Sub '${AppName}-${Environment}-ec2-role'
+      Path: /
+      Roles:
+        - !Ref EC2IamRole
+        
+  ############################################################
+  #              DNS RECORDS BLOCK
+  ############################################################ 
+  
+  # --- Wordpress DNS record
+#   WordpressDNSRecord:
+#     Type: AWS::Route53::RecordSet
+#     Properties:
+#       HostedZoneName: !Join ['', [!Ref HostedZoneName, .]]
+#       Name: !Join ['', ['wordpress', ., !Ref HostedZoneName, .]]
+#       Type: A
+#       AliasTarget:
+#         DNSName: !GetAtt ApplicationLB.DNSName
+#         HostedZoneId: !GetAtt ApplicationLB.CanonicalHostedZoneID
+ 

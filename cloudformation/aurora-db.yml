@@ -1,0 +1,200 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: >
+  A CloudFormation template for an RDS Aurora Mysql cluster.
+  
+Parameters:
+  DatabaseUsername:
+    AllowedPattern: "[a-zA-Z0-9]+"
+    ConstraintDescription: must be between 1 to 16 alphanumeric characters.
+    Description: The database admin account user name, between 1 to 16 alphanumeric characters.
+    MaxLength: '16'
+    MinLength: '1'
+    Type: String
+  DatabasePassword:
+    AllowedPattern: "[a-zA-Z0-9]+"
+    ConstraintDescription: must be between 8 to 41 alphanumeric characters.
+    Description: The database admin account password, between 8 to 41 alphanumeric characters.
+    MaxLength: '41'
+    MinLength: '8'
+    NoEcho: 'true'
+    Type: String
+  VPC:
+    Type: AWS::EC2::VPC::Id
+  DBSubnetIds:
+     Type: 'List<AWS::EC2::Subnet::Id>'
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - stage
+      - prod     
+  InstanceType:
+    Type: String
+    Default: db.r4.large
+   
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Database Configuration
+        Parameters:
+          - Environment
+          - DatabaseUsername
+          - DatabasePassword
+          - InstanceType
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VPC
+          - DBSubnetIds          
+    ParameterLabels:
+      DatabaseUsername:
+        default: Database Username
+      DatabasePassword:
+        default: Database Password
+
+Resources:
+  # ---------------------------------------------------------
+  # --- DB Alarm SNS Topic
+  # ---------------------------------------------------------
+  DBAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'cw-${Environment}-aurora-mysql-Alarm-Topic'
+      DisplayName: Aurora DB Alarm Topic
+
+  # ---------------------------------------------------------
+  # --- Aurora Cluster Subnet Groups
+  # ---------------------------------------------------------
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub 'cw-${Environment}-aurora-mysql-subnetgroup'
+      DBSubnetGroupDescription: CloudFormation managed DB subnet group.
+      SubnetIds: !Ref DBSubnetIds
+
+  # ---------------------------------------------------------
+  # --- Aurora Mysql Parameter Groups
+  # ---------------------------------------------------------
+  RDSDBClusterParameterGroup:
+    Type: "AWS::RDS::DBClusterParameterGroup"
+    Properties: 
+      Description: "CW Aurora Cluster Parameter Group"
+      Family: aurora5.6
+      Parameters:
+        character_set_database: utf32
+        
+  # ---------------------------------------------------------
+  # --- Aurora Cluster
+  # ---------------------------------------------------------
+  DatabaseCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBClusterIdentifier: !Sub 'cw-${Environment}-aurora-mysql-cluster'
+      Engine: aurora
+      EngineVersion: '5.6.10a'
+      DBClusterParameterGroupName: !Ref RDSDBClusterParameterGroup
+      MasterUsername: !Ref "DatabaseUsername"
+      MasterUserPassword: !Ref "DatabasePassword"
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: 01:00-02:00
+      PreferredMaintenanceWindow: mon:03:00-mon:04:00
+      DBSubnetGroupName: !Ref "DatabaseSubnetGroup"
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+
+  # ---------------------------------------------------------
+  # --- Aurora Primary Instance
+  # ---------------------------------------------------------
+  DatabasePrimaryInstance:
+    Type: AWS::RDS::DBInstance
+    Properties: 
+      Engine: aurora
+      DBClusterIdentifier: !Ref "DatabaseCluster"
+      DBInstanceClass: !Ref "InstanceType"
+      DBSubnetGroupName: !Ref "DatabaseSubnetGroup"
+      EnablePerformanceInsights: true
+
+  # --- alarm if primary instance cpu utilization is over 80%
+  DatabasePrimaryCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'cw-${Environment}-aurora-mysql-cluster-primary-db-cpu-alarm'
+      AlarmDescription: Primary database CPU utilization is over 80%.
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Unit: Percent
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref "DatabasePrimaryInstance"
+      AlarmActions:
+        - Ref: DBAlarmTopic
+      InsufficientDataActions:
+        - Ref: DBAlarmTopic
+
+  # --- alarm if primary instance freeable memory is under 700MB
+  DatabasePrimaryMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'cw-${Environment}-aurora-mysql-cluster-primary-db-memory-alarm'    
+      AlarmDescription: Primary database freeable memory is under 700MB.
+      Namespace: AWS/RDS
+      MetricName: FreeableMemory
+      Unit: Bytes
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 700000000
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref "DatabasePrimaryInstance"
+      AlarmActions:
+        - Ref: DBAlarmTopic
+      InsufficientDataActions:
+        - Ref: DBAlarmTopic
+
+  # --- alarm if primary instance latency is over 200ms
+  DatabasePrimaryReplicationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'cw-${Environment}-aurora-mysql-cluster-primary-db-latency-alarm'    
+      AlarmDescription: Database replication latency is over 200ms.
+      Namespace: AWS/RDS
+      MetricName: AuroraReplicaLag
+      Unit: Milliseconds
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 200
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref "DatabasePrimaryInstance"
+      AlarmActions:
+        - Ref: DBAlarmTopic
+        
+
+  # --- Database security-group
+  DBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: !Sub 'cw-${Environment}-aurora-mysql-security-group'
+      VpcId: !Ref VPC
+      GroupDescription: Security group allowing connectiong to Aurora dabatase
+  DBInboundRule:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !GetAtt DBSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: '3306'
+      ToPort: '3306'
+      SourceSecurityGroupId: !GetAtt DBSecurityGroup.GroupId
